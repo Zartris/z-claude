@@ -1,0 +1,13 @@
+{
+  "name": "z-claude",
+  "owner": {
+    "name": "Zartris",
+    "email": "zartris@users.noreply.github.com"
+  },
+  "metadata": {
+    "description": "A curated collection of Claude Code plugins by Zartris",
+    "version": "0.1.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": []
+}
