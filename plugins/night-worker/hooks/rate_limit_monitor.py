@@ -92,6 +92,17 @@ def check_limits(state: dict | None) -> tuple[bool, float, str]:
         used = window.get("used_percentage", 0)
         resets_at = window.get("resets_at", 0)
 
+        # Validate resets_at is a plausible Unix epoch in seconds.
+        # Guards against milliseconds (13 digits), strings, or garbage.
+        if not isinstance(resets_at, (int, float)):
+            continue
+        if resets_at > 1e12:
+            # Likely milliseconds — convert to seconds.
+            resets_at = resets_at / 1000
+        if resets_at < 1e9:
+            # Not a valid epoch timestamp (before ~2001).
+            continue
+
         if used >= THRESHOLD_PERCENT and resets_at > now:
             sleep_seconds = min(resets_at - now, MAX_SLEEP)
             return True, sleep_seconds, window_name
@@ -128,8 +139,14 @@ def main() -> None:
         sys.exit(0)
 
     # --- Rate limit threshold exceeded — sleep until resets_at ---
+    # Both resets_at and time.time() are Unix epoch seconds (UTC).
+    # The chain: Anthropic API sends RFC 3339 headers → Claude Code
+    # converts to epoch seconds → status line JSON → our state file.
+    # No timezone conversion needed; epoch is timezone-agnostic.
 
     resets_at = state[window_name]["resets_at"]
+    if resets_at > 1e12:
+        resets_at = resets_at / 1000
     used_pct = state[window_name]["used_percentage"]
     log(
         f"Rate limit {format_window(window_name)} at {used_pct:.1f}% "
