@@ -12,14 +12,14 @@
   "plugins": [
     {
       "name": "night-worker",
-      "description": "Automate long-running overnight tasks -- batch jobs, CI monitoring, deployment checks, and async work queues",
+      "description": "Protect long-running Claude Code sessions from rate limit crashes with a smart pause mechanism",
       "version": "1.0.0",
       "author": { "name": "Zartris" },
       "source": "./plugins/night-worker",
       "license": "MIT",
       "category": "workflow",
-      "tags": ["automation", "background", "overnight", "batch", "monitoring"],
-      "keywords": ["automation", "background", "overnight", "batch", "monitoring", "queue"]
+      "tags": ["rate-limit", "overnight", "automation", "hooks", "429"],
+      "keywords": ["rate-limit", "overnight", "automation", "hooks", "429", "pause", "sleep"]
     }
   ]
 }

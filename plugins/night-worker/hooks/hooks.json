@@ -1,4 +1,17 @@
 {
+  "PreToolUse": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/rate_limit_monitor.py",
+          "timeout": 20000,
+          "statusMessage": "Checking rate limits..."
+        }
+      ]
+    }
+  ],
   "PostToolUse": [
     {
       "matcher": "Bash",

@@ -1,12 +1,14 @@
 # /night-status
 
-Show the current status of queued night-worker tasks.
+Show the current rate limit status and night-worker state.
 
-When invoked, check for any running background processes started by the
-night-worker plugin and report:
+When invoked, read `~/.claude/night-worker-rate-limits.json` and report:
 
-- Number of tasks completed vs remaining
-- Current task name and elapsed time
-- Any failures encountered so far
+- 5-hour window: usage percentage and time until reset
+- 7-day window: usage percentage and time until reset
+- Current threshold setting (from `NIGHT_WORKER_THRESHOLD` env var, default 80%)
+- Whether the monitor would currently pause (usage >= threshold)
 
-If no tasks are running, report that the queue is empty.
+If the state file is missing or stale (>5 minutes old), report that the status
+line bridge is not configured or not running, and point the user to the setup
+instructions in the plugin README.

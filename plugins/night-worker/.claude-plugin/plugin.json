@@ -1,12 +1,12 @@
 {
   "name": "night-worker",
   "version": "1.0.0",
-  "description": "Automate long-running overnight tasks -- batch jobs, CI monitoring, deployment checks, and async work queues",
+  "description": "Protect long-running Claude Code sessions from rate limit crashes with a smart pause mechanism",
   "author": {
     "name": "Zartris"
   },
   "license": "MIT",
-  "keywords": ["automation", "background", "overnight", "batch", "monitoring"],
+  "keywords": ["rate-limit", "overnight", "automation", "hooks", "429"],
   "skills": "./skills",
   "agents": ["./agents/night-shift.md"],
   "commands": "./commands",

@@ -1,25 +1,61 @@
 # Night Worker
 
-Automate long-running overnight tasks. Use this skill when the user wants to
-set up, monitor, or manage batch jobs that run while they are away.
+Protect long-running autonomous Claude Code sessions from crashing due to
+Anthropic API rate limits (429 Too Many Requests).
 
-## Capabilities
+## How it works
 
-- Queue a list of tasks to run sequentially or in parallel
-- Monitor running background processes and report status
-- Retry failed tasks with exponential backoff
-- Summarize results when the user returns
+This plugin uses two components that share state via a local file:
 
-## Usage
+1. **Status line bridge** (`statusline-bridge.sh`) — runs after every assistant
+   message. Reads the `rate_limits` JSON that Claude Code pipes to status line
+   scripts (5-hour and 7-day windows with `used_percentage` and `resets_at`),
+   and writes it to `~/.claude/night-worker-rate-limits.json`.
 
-Trigger: The user asks to "run overnight", "batch process", "queue up work",
-or wants to schedule tasks for unattended execution.
+2. **PreToolUse hook** (`rate_limit_monitor.py`) — runs before every tool call.
+   Reads the cached rate limit state. If any window exceeds the threshold
+   (default 80%), the script sleeps in 60-second loops, re-checking the state
+   file each cycle. Once limits reset, it exits cleanly and the tool call
+   proceeds as if nothing happened.
 
-## Instructions
+Zero extra API calls. The rate limit data comes from response headers that
+Claude Code already parses (`anthropic-ratelimit-unified-5h-utilization`,
+`anthropic-ratelimit-unified-7d-utilization`).
 
-1. Gather the list of tasks from the user.
-2. Validate each task can run non-interactively (no prompts, no GUI).
-3. Execute tasks using background processes, capturing stdout and stderr.
-4. On failure, retry up to 3 times with exponential backoff (2s, 4s, 8s).
-5. Write a summary report to `night-worker-report.md` when all tasks complete.
-6. If the user returns mid-run, provide a live status overview on request.
+## Setup
+
+The plugin hooks are installed automatically. You only need to configure the
+status line bridge so the hook has rate limit data to read.
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "<plugin-install-path>/hooks/statusline-bridge.sh"
+  }
+}
+```
+
+Or add the state-writing block to your existing status line script:
+
+```bash
+STATE_FILE="${HOME}/.claude/night-worker-rate-limits.json"
+rate_limits=$(echo "$input" | jq -e '.rate_limits // empty' 2>/dev/null) || true
+if [ -n "$rate_limits" ]; then
+    echo "$rate_limits" > "$STATE_FILE"
+fi
+```
+
+## Configuration
+
+Override defaults via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NIGHT_WORKER_THRESHOLD` | `80` | Pause when usage exceeds this % |
+| `NIGHT_WORKER_RECHECK_INTERVAL` | `60` | Seconds between re-checks during pause |
+| `NIGHT_WORKER_STATE_FILE` | `~/.claude/night-worker-rate-limits.json` | Shared state file path |
+| `NIGHT_WORKER_MAX_SLEEP` | `21600` | Maximum sleep duration in seconds (6h) |
+| `NIGHT_WORKER_MAX_STATE_AGE` | `300` | Ignore state file if older than this (seconds) |
