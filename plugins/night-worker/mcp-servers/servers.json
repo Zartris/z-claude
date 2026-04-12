@@ -1,0 +1,9 @@
+{
+  "night-worker-queue": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/mcp-servers/queue-server.sh",
+    "args": ["--port", "0"],
+    "env": {
+      "NIGHT_WORKER_LOG_DIR": "${CLAUDE_PLUGIN_ROOT}/logs"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "night-worker",
+  "version": "1.0.0",
+  "description": "Automate long-running overnight tasks -- batch jobs, CI monitoring, deployment checks, and async work queues",
+  "author": {
+    "name": "Zartris"
+  },
+  "license": "MIT",
+  "keywords": ["automation", "background", "overnight", "batch", "monitoring"],
+  "skills": "./skills",
+  "agents": ["./agents/night-shift.md"],
+  "commands": "./commands",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./mcp-servers/servers.json",
+  "lspServers": "./lsp-servers/servers.json"
+}

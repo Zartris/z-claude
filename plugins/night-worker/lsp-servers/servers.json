@@ -1,0 +1,8 @@
+{
+  "night-worker-diagnostics": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/lsp-servers/diagnostics-server.sh",
+    "args": [],
+    "languages": ["markdown"],
+    "filePatterns": ["night-worker-report.md"]
+  }
+}

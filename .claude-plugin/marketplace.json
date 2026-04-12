@@ -9,5 +9,17 @@
     "version": "0.1.0",
     "pluginRoot": "./plugins"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "night-worker",
+      "description": "Automate long-running overnight tasks -- batch jobs, CI monitoring, deployment checks, and async work queues",
+      "version": "1.0.0",
+      "author": { "name": "Zartris" },
+      "source": "./plugins/night-worker",
+      "license": "MIT",
+      "category": "workflow",
+      "tags": ["automation", "background", "overnight", "batch", "monitoring"],
+      "keywords": ["automation", "background", "overnight", "batch", "monitoring", "queue"]
+    }
+  ]
 }
