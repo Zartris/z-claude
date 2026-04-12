@@ -172,7 +172,7 @@ def main() -> None:
         # (e.g. user interacted manually), check if limits dropped.
         fresh_state = read_state()
         if fresh_state is not None:
-            fresh_exceeded, _, fresh_window = check_limits(fresh_state)
+            fresh_exceeded, _, _ = check_limits(fresh_state)
             if not fresh_exceeded:
                 log("Rate limits dropped below threshold. Resuming early.")
                 break
