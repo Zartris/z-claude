@@ -3,15 +3,22 @@
 PreToolUse hook: Rate limit monitor for Claude Code.
 
 Reads cached rate limit state written by the status line bridge script.
-If usage exceeds the configured threshold, sleeps until the reset time,
-re-checking periodically in case limits reset sooner than expected.
+If usage exceeds the configured threshold, sleeps until the `resets_at`
+timestamp (set by Anthropic's servers), then exits cleanly.
+
+The primary wake condition is the clock reaching `resets_at`, NOT the
+state file updating. This is critical because while the hook is sleeping,
+no tool calls run, no assistant messages are generated, and the status
+line never re-runs — so the state file stays frozen. The re-check loop
+is only an early-exit optimization for the rare case that the file does
+get updated (e.g. the user interacts manually).
 
 Architecture:
   StatusLine script (runs after every assistant message)
     → writes rate_limits JSON to STATE_FILE
   This script (runs before every tool call)
     → reads STATE_FILE
-    → if over threshold: sleep in loops, re-checking periodically
+    → if over threshold: sleep until resets_at, checking periodically
     → exit 0 to allow the tool call to proceed
 """
 
@@ -120,36 +127,42 @@ def main() -> None:
     if not exceeded:
         sys.exit(0)
 
-    # --- Rate limit threshold exceeded — enter sleep loop ---
+    # --- Rate limit threshold exceeded — sleep until resets_at ---
 
+    resets_at = state[window_name]["resets_at"]
     used_pct = state[window_name]["used_percentage"]
     log(
         f"Rate limit {format_window(window_name)} at {used_pct:.1f}% "
         f"(threshold: {THRESHOLD_PERCENT:.0f}%). "
-        f"Pausing for up to {format_duration(sleep_seconds)} until reset."
+        f"Sleeping until reset in {format_duration(sleep_seconds)}."
     )
 
-    remaining = sleep_seconds
-    while remaining > 0:
-        chunk = min(RECHECK_INTERVAL, remaining)
-        time.sleep(chunk)
-        remaining -= chunk
+    # Sleep in chunks. The primary wake condition is the clock reaching
+    # resets_at. The state file re-check is only an early-exit optimization
+    # (the file won't normally update while we're blocking the tool loop).
+    while True:
+        now = time.time()
+        remaining = min(resets_at - now, MAX_SLEEP)
 
-        # Re-read state — the status line keeps updating it.
-        state = read_state()
-        exceeded, new_sleep, window_name = check_limits(state)
-
-        if not exceeded:
-            log("Rate limits have reset. Resuming.")
+        if remaining <= 0:
+            log("Reset time reached. Resuming.")
             break
 
-        # Use the freshest sleep estimate.
-        remaining = min(new_sleep, remaining)
-        current_pct = state.get(window_name, {}).get("used_percentage", 0)
-        log(
-            f"Still paused. {format_window(window_name)} at {current_pct:.1f}%. "
-            f"~{format_duration(remaining)} remaining."
-        )
+        chunk = min(RECHECK_INTERVAL, remaining)
+        time.sleep(chunk)
+
+        # Early exit: if the state file happens to have been updated
+        # (e.g. user interacted manually), check if limits dropped.
+        fresh_state = read_state()
+        if fresh_state is not None:
+            fresh_exceeded, _, fresh_window = check_limits(fresh_state)
+            if not fresh_exceeded:
+                log("Rate limits dropped below threshold. Resuming early.")
+                break
+
+        time_left = resets_at - time.time()
+        if time_left > 0:
+            log(f"Still paused. ~{format_duration(time_left)} until reset.")
 
     # Exit 0 — allow the tool call to proceed.
     sys.exit(0)
