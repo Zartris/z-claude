@@ -18,6 +18,11 @@ exposed by Claude Code's status line JSON. Per-minute rate limits
 (RPM, input-TPM, output-TPM) are NOT available to hooks and can still
 cause 429 errors that this monitor cannot prevent.
 
+Logging:
+  - Log file: ~/.claude/night-worker.log  (persistent, append-only)
+  - stdout JSON systemMessage: shown in Claude Code chat (sleep/resume only)
+  - stderr: Claude Code debug log only (not visible in chat)
+
 Architecture:
   StatusLine script (runs after every assistant message)
     → writes rate_limits JSON to STATE_FILE
@@ -32,6 +37,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Configuration — edit these or override via environment variables
@@ -51,6 +57,14 @@ STATE_FILE = os.path.expanduser(
     )
 )
 
+# Persistent log file for debugging.
+LOG_FILE = os.path.expanduser(
+    os.environ.get(
+        "NIGHT_WORKER_LOG_FILE",
+        "~/.claude/night-worker.log",
+    )
+)
+
 # Safety cap: never sleep longer than this (seconds). Default 6 hours.
 MAX_SLEEP = int(os.environ.get("NIGHT_WORKER_MAX_SLEEP", str(6 * 3600)))
 
@@ -59,9 +73,52 @@ MAX_SLEEP = int(os.environ.get("NIGHT_WORKER_MAX_SLEEP", str(6 * 3600)))
 MAX_STATE_AGE = int(os.environ.get("NIGHT_WORKER_MAX_STATE_AGE", "300"))
 
 
+# ---------------------------------------------------------------------------
+# Logging — writes to both a persistent log file and stderr
+# ---------------------------------------------------------------------------
+
+_log_file_handle = None
+
+
+def _open_log_file():
+    global _log_file_handle
+    if _log_file_handle is not None:
+        return
+    try:
+        Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+        _log_file_handle = open(LOG_FILE, "a")
+    except OSError:
+        _log_file_handle = None
+
+
 def log(msg: str) -> None:
-    """Write to stderr so the message appears in Claude Code's UI."""
+    """Write to the persistent log file and stderr."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    full_msg = f"[{timestamp}] {msg}"
+
+    # Persistent log file (primary — always readable after the fact).
+    _open_log_file()
+    if _log_file_handle is not None:
+        _log_file_handle.write(full_msg + "\n")
+        _log_file_handle.flush()
+
+    # stderr (goes to Claude Code debug log).
     print(f"[night-worker] {msg}", file=sys.stderr, flush=True)
+
+
+def emit_system_message(message: str) -> None:
+    """
+    Write a JSON response to stdout with systemMessage.
+    This is shown to the user in the Claude Code chat.
+    Can only be called once (at exit) — stdout is read as a single JSON blob.
+    """
+    output = {"systemMessage": f"[night-worker] {message}"}
+    print(json.dumps(output), flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def epoch_to_local(epoch: float) -> str:
@@ -107,10 +164,15 @@ def normalize_epoch(value: object) -> float | None:
     return epoch
 
 
+# ---------------------------------------------------------------------------
+# State reading
+# ---------------------------------------------------------------------------
+
+
 def read_state_raw() -> tuple[dict | None, str]:
     """
     Read the rate limit state file. Returns (state_dict, status_message).
-    Unlike read_state(), always returns a diagnostic message for logging.
+    Always returns a diagnostic message explaining the result.
     """
     try:
         mtime = os.path.getmtime(STATE_FILE)
@@ -121,28 +183,32 @@ def read_state_raw() -> tuple[dict | None, str]:
 
     age = time.time() - mtime
     age_str = format_duration(age)
+    mtime_str = epoch_to_local(mtime)
 
     if age > MAX_STATE_AGE:
         return None, (
-            f"state file is stale ({age_str} old, max {format_duration(MAX_STATE_AGE)}): "
-            f"{STATE_FILE}"
+            f"state file STALE ({age_str} old, max {format_duration(MAX_STATE_AGE)}), "
+            f"last written {mtime_str}: {STATE_FILE}"
         )
 
     try:
         with open(STATE_FILE, "r") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        return None, f"state file has invalid JSON: {e}"
+            raw = f.read()
     except OSError as e:
         return None, f"cannot read state file: {e}"
 
-    return data, f"state file OK ({age_str} old)"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, f"state file has invalid JSON: {e}, content: {raw[:200]}"
+
+    return data, f"state file OK ({age_str} old, written {mtime_str})"
 
 
 def dump_state(state: dict | None) -> str:
     """Format the full state for logging."""
     if state is None:
-        return "  (no state)"
+        return "  (no state data)"
 
     now = time.time()
     lines = []
@@ -150,7 +216,7 @@ def dump_state(state: dict | None) -> str:
     for window_name in ("five_hour", "seven_day"):
         window = state.get(window_name)
         if not window:
-            lines.append(f"  {format_window(window_name)}: not present")
+            lines.append(f"  {format_window(window_name)}: not present in state")
             continue
 
         used = window.get("used_percentage", "?")
@@ -162,16 +228,29 @@ def dump_state(state: dict | None) -> str:
             if time_until > 0:
                 reset_str = f"{epoch_to_local(epoch)} (in {format_duration(time_until)})"
             else:
-                reset_str = f"{epoch_to_local(epoch)} (already passed, {format_duration(-time_until)} ago)"
+                reset_str = (
+                    f"{epoch_to_local(epoch)} "
+                    f"(ALREADY PASSED {format_duration(-time_until)} ago)"
+                )
         else:
-            reset_str = f"invalid ({raw_resets_at!r})"
+            reset_str = f"INVALID value ({raw_resets_at!r})"
 
+        over = used >= THRESHOLD_PERCENT if isinstance(used, (int, float)) else "?"
         lines.append(
             f"  {format_window(window_name)}: "
-            f"used={used}%, resets_at={reset_str}"
+            f"used={used}% {'>> OVER THRESHOLD' if over is True else '(ok)'}, "
+            f"resets_at={reset_str}"
         )
 
+    # Also dump raw JSON for full transparency.
+    lines.append(f"  raw state: {json.dumps(state)}")
+
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Rate limit evaluation
+# ---------------------------------------------------------------------------
 
 
 def check_limits(state: dict | None) -> tuple[bool, float, str]:
@@ -204,29 +283,39 @@ def check_limits(state: dict | None) -> tuple[bool, float, str]:
     return False, 0, ""
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
     # Read hook input from stdin (required by Claude Code hook protocol).
     raw_input = sys.stdin.read()
 
     # Parse hook input for context logging.
     tool_name = "?"
+    session_id = "?"
     try:
         hook_input = json.loads(raw_input)
         tool_name = hook_input.get("tool_name", "?")
+        session_id = hook_input.get("session_id", "?")
     except (json.JSONDecodeError, TypeError):
         pass
+
+    log(f"--- PreToolUse hook fired: tool={tool_name} session={session_id}")
 
     # Read and evaluate rate limit state.
     state, state_status = read_state_raw()
 
     if state is None:
-        # No usable state — log why and allow the tool call.
         log(
-            f"PASS (no state) tool={tool_name}\n"
+            f"PASS (no usable state) tool={tool_name}\n"
             f"  reason: {state_status}\n"
             f"  config: threshold={THRESHOLD_PERCENT}%, "
-            f"max_state_age={format_duration(MAX_STATE_AGE)}"
+            f"max_state_age={format_duration(MAX_STATE_AGE)}, "
+            f"state_file={STATE_FILE}"
         )
+        # No systemMessage — silent pass, nothing to show the user.
         sys.exit(0)
 
     exceeded, sleep_seconds, window_name = check_limits(state)
@@ -238,6 +327,7 @@ def main() -> None:
             f"  threshold: {THRESHOLD_PERCENT}%\n"
             f"{dump_state(state)}"
         )
+        # No systemMessage — silent pass.
         sys.exit(0)
 
     # --- Rate limit threshold exceeded — sleep until resets_at ---
@@ -249,14 +339,23 @@ def main() -> None:
     resets_at = normalize_epoch(state[window_name]["resets_at"])
     used_pct = state[window_name]["used_percentage"]
 
+    sleep_msg = (
+        f"Rate limit {format_window(window_name)} at {used_pct:.1f}% "
+        f"(threshold: {THRESHOLD_PERCENT:.0f}%). "
+        f"Sleeping {format_duration(sleep_seconds)} until "
+        f"{epoch_to_local(resets_at)}."
+    )
+
     log(
         f"SLEEPING tool={tool_name}\n"
         f"  {state_status}\n"
         f"  threshold: {THRESHOLD_PERCENT}%\n"
         f"  triggered by: {format_window(window_name)} at {used_pct:.1f}%\n"
         f"  resets at: {epoch_to_local(resets_at)}\n"
-        f"  sleep duration: {format_duration(sleep_seconds)} (max {format_duration(MAX_SLEEP)})\n"
+        f"  sleep duration: {format_duration(sleep_seconds)} "
+        f"(cap: {format_duration(MAX_SLEEP)})\n"
         f"  re-check interval: {format_duration(RECHECK_INTERVAL)}\n"
+        f"  log file: {LOG_FILE}\n"
         f"  full state:\n"
         f"{dump_state(state)}"
     )
@@ -270,11 +369,17 @@ def main() -> None:
         remaining = min(resets_at - now, MAX_SLEEP)
 
         if remaining <= 0:
+            resume_msg = (
+                f"Reset time reached after {cycle} cycles "
+                f"({format_duration(cycle * RECHECK_INTERVAL)}). Resuming."
+            )
             log(
                 f"RESUMING (reset time reached)\n"
-                f"  slept for {cycle} cycles ({cycle * RECHECK_INTERVAL}s)\n"
+                f"  slept for: {cycle} cycles "
+                f"({format_duration(cycle * RECHECK_INTERVAL)})\n"
                 f"  proceeding with tool={tool_name}"
             )
+            emit_system_message(f"{sleep_msg}\n{resume_msg}")
             break
 
         chunk = min(RECHECK_INTERVAL, remaining)
@@ -287,21 +392,29 @@ def main() -> None:
         if fresh_state is not None:
             fresh_exceeded, _, _ = check_limits(fresh_state)
             if not fresh_exceeded:
+                resume_msg = (
+                    f"Limits dropped below threshold after {cycle} cycles "
+                    f"({format_duration(cycle * RECHECK_INTERVAL)}). "
+                    f"Resuming early."
+                )
                 log(
-                    f"RESUMING EARLY (limits dropped below threshold)\n"
-                    f"  slept for {cycle} cycles ({cycle * RECHECK_INTERVAL}s)\n"
+                    f"RESUMING EARLY (limits below threshold)\n"
+                    f"  slept for: {cycle} cycles "
+                    f"({format_duration(cycle * RECHECK_INTERVAL)})\n"
                     f"  {fresh_status}\n"
                     f"  fresh state:\n"
                     f"{dump_state(fresh_state)}\n"
                     f"  proceeding with tool={tool_name}"
                 )
+                emit_system_message(f"{sleep_msg}\n{resume_msg}")
                 break
 
         time_left = resets_at - time.time()
         if time_left > 0:
             log(
-                f"  cycle {cycle}: ~{format_duration(time_left)} until reset "
-                f"({epoch_to_local(resets_at)})"
+                f"  cycle {cycle}: sleeping... "
+                f"~{format_duration(time_left)} remaining until "
+                f"{epoch_to_local(resets_at)}"
             )
 
     # Exit 0 — allow the tool call to proceed.

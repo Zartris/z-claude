@@ -14,13 +14,33 @@ This plugin uses two components that share state via a local file:
 
 2. **PreToolUse hook** (`rate_limit_monitor.py`) — runs before every tool call.
    Reads the cached rate limit state. If any window exceeds the threshold
-   (default 80%), the script sleeps in 60-second loops, re-checking the state
-   file each cycle. Once limits reset, it exits cleanly and the tool call
-   proceeds as if nothing happened.
+   (default 95%), the script sleeps until the `resets_at` timestamp, checking
+   every 60 seconds for early exit. Once limits reset, it exits cleanly and
+   the tool call proceeds as if nothing happened.
 
 Zero extra API calls. The rate limit data comes from response headers that
 Claude Code already parses (`anthropic-ratelimit-unified-5h-utilization`,
 `anthropic-ratelimit-unified-7d-utilization`).
+
+**Limitation:** Per-minute rate limits (RPM, input-TPM, output-TPM) are NOT
+available to hooks and can still cause 429 errors.
+
+## Logging
+
+All decisions are logged to **`~/.claude/night-worker.log`** (append-only).
+Every log entry includes: tool name, session ID, state file age, both rate
+limit windows with used%, reset time as human-readable local datetime, time
+until reset, and the raw state JSON.
+
+When the monitor sleeps or resumes, a **systemMessage** is shown in the
+Claude Code chat. Normal PASS decisions are silent in the chat but logged
+to the file.
+
+To tail the log in real time:
+
+```bash
+tail -f ~/.claude/night-worker.log
+```
 
 ## Setup
 
@@ -57,5 +77,6 @@ Override defaults via environment variables:
 | `NIGHT_WORKER_THRESHOLD` | `95` | Pause when usage exceeds this % |
 | `NIGHT_WORKER_RECHECK_INTERVAL` | `60` | Seconds between re-checks during pause |
 | `NIGHT_WORKER_STATE_FILE` | `~/.claude/night-worker-rate-limits.json` | Shared state file path |
+| `NIGHT_WORKER_LOG_FILE` | `~/.claude/night-worker.log` | Persistent log file |
 | `NIGHT_WORKER_MAX_SLEEP` | `21600` | Maximum sleep duration in seconds (6h) |
 | `NIGHT_WORKER_MAX_STATE_AGE` | `300` | Ignore state file if older than this (seconds) |
