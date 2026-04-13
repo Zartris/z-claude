@@ -54,7 +54,7 @@ Override defaults via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NIGHT_WORKER_THRESHOLD` | `80` | Pause when usage exceeds this % |
+| `NIGHT_WORKER_THRESHOLD` | `95` | Pause when usage exceeds this % |
 | `NIGHT_WORKER_RECHECK_INTERVAL` | `60` | Seconds between re-checks during pause |
 | `NIGHT_WORKER_STATE_FILE` | `~/.claude/night-worker-rate-limits.json` | Shared state file path |
 | `NIGHT_WORKER_MAX_SLEEP` | `21600` | Maximum sleep duration in seconds (6h) |

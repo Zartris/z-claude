@@ -32,7 +32,7 @@ import time
 # ---------------------------------------------------------------------------
 
 # Pause when any rate limit window exceeds this percentage (0-100).
-THRESHOLD_PERCENT = float(os.environ.get("NIGHT_WORKER_THRESHOLD", "80"))
+THRESHOLD_PERCENT = float(os.environ.get("NIGHT_WORKER_THRESHOLD", "95"))
 
 # Seconds between re-checks while sleeping.
 RECHECK_INTERVAL = int(os.environ.get("NIGHT_WORKER_RECHECK_INTERVAL", "60"))
