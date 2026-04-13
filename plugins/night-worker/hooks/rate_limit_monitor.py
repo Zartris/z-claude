@@ -13,6 +13,11 @@ line never re-runs — so the state file stays frozen. The re-check loop
 is only an early-exit optimization for the rare case that the file does
 get updated (e.g. the user interacts manually).
 
+IMPORTANT: This monitor only tracks the 5-hour and 7-day unified quotas
+exposed by Claude Code's status line JSON. Per-minute rate limits
+(RPM, input-TPM, output-TPM) are NOT available to hooks and can still
+cause 429 errors that this monitor cannot prevent.
+
 Architecture:
   StatusLine script (runs after every assistant message)
     → writes rate_limits JSON to STATE_FILE
@@ -26,6 +31,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Configuration — edit these or override via environment variables
@@ -58,18 +64,114 @@ def log(msg: str) -> None:
     print(f"[night-worker] {msg}", file=sys.stderr, flush=True)
 
 
-def read_state() -> dict | None:
-    """Read the rate limit state file written by the status line bridge."""
+def epoch_to_local(epoch: float) -> str:
+    """Convert a Unix epoch to a human-readable local time string."""
+    try:
+        dt = datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone()
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except (OSError, ValueError, OverflowError):
+        return f"epoch={epoch}"
+
+
+def format_duration(seconds: float) -> str:
+    """Format seconds into a human-readable duration."""
+    if seconds < 0:
+        return "0s"
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def format_window(name: str) -> str:
+    return name.replace("_", "-")
+
+
+def normalize_epoch(value: object) -> float | None:
+    """
+    Validate and normalize a resets_at value to Unix epoch seconds.
+    Returns None if the value is not a plausible epoch.
+    """
+    if not isinstance(value, (int, float)):
+        return None
+    epoch = float(value)
+    if epoch > 1e12:
+        # Likely milliseconds — convert to seconds.
+        epoch = epoch / 1000
+    if epoch < 1e9:
+        # Not a valid epoch timestamp (before ~2001).
+        return None
+    return epoch
+
+
+def read_state_raw() -> tuple[dict | None, str]:
+    """
+    Read the rate limit state file. Returns (state_dict, status_message).
+    Unlike read_state(), always returns a diagnostic message for logging.
+    """
     try:
         mtime = os.path.getmtime(STATE_FILE)
-        age = time.time() - mtime
-        if age > MAX_STATE_AGE:
-            return None
+    except FileNotFoundError:
+        return None, f"state file not found: {STATE_FILE}"
+    except OSError as e:
+        return None, f"cannot stat state file: {e}"
 
+    age = time.time() - mtime
+    age_str = format_duration(age)
+
+    if age > MAX_STATE_AGE:
+        return None, (
+            f"state file is stale ({age_str} old, max {format_duration(MAX_STATE_AGE)}): "
+            f"{STATE_FILE}"
+        )
+
+    try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        return None, f"state file has invalid JSON: {e}"
+    except OSError as e:
+        return None, f"cannot read state file: {e}"
+
+    return data, f"state file OK ({age_str} old)"
+
+
+def dump_state(state: dict | None) -> str:
+    """Format the full state for logging."""
+    if state is None:
+        return "  (no state)"
+
+    now = time.time()
+    lines = []
+
+    for window_name in ("five_hour", "seven_day"):
+        window = state.get(window_name)
+        if not window:
+            lines.append(f"  {format_window(window_name)}: not present")
+            continue
+
+        used = window.get("used_percentage", "?")
+        raw_resets_at = window.get("resets_at", "?")
+        epoch = normalize_epoch(raw_resets_at)
+
+        if epoch is not None:
+            time_until = epoch - now
+            if time_until > 0:
+                reset_str = f"{epoch_to_local(epoch)} (in {format_duration(time_until)})"
+            else:
+                reset_str = f"{epoch_to_local(epoch)} (already passed, {format_duration(-time_until)} ago)"
+        else:
+            reset_str = f"invalid ({raw_resets_at!r})"
+
+        lines.append(
+            f"  {format_window(window_name)}: "
+            f"used={used}%, resets_at={reset_str}"
+        )
+
+    return "\n".join(lines)
 
 
 def check_limits(state: dict | None) -> tuple[bool, float, str]:
@@ -90,17 +192,9 @@ def check_limits(state: dict | None) -> tuple[bool, float, str]:
             continue
 
         used = window.get("used_percentage", 0)
-        resets_at = window.get("resets_at", 0)
+        resets_at = normalize_epoch(window.get("resets_at", 0))
 
-        # Validate resets_at is a plausible Unix epoch in seconds.
-        # Guards against milliseconds (13 digits), strings, or garbage.
-        if not isinstance(resets_at, (int, float)):
-            continue
-        if resets_at > 1e12:
-            # Likely milliseconds — convert to seconds.
-            resets_at = resets_at / 1000
-        if resets_at < 1e9:
-            # Not a valid epoch timestamp (before ~2001).
+        if resets_at is None:
             continue
 
         if used >= THRESHOLD_PERCENT and resets_at > now:
@@ -110,32 +204,40 @@ def check_limits(state: dict | None) -> tuple[bool, float, str]:
     return False, 0, ""
 
 
-def format_window(name: str) -> str:
-    return name.replace("_", "-")
-
-
-def format_duration(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    if seconds < 3600:
-        return f"{seconds / 60:.0f}m"
-    hours = seconds / 3600
-    return f"{hours:.1f}h"
-
-
 def main() -> None:
-    # Consume stdin (required by Claude Code hook protocol).
-    sys.stdin.read()
+    # Read hook input from stdin (required by Claude Code hook protocol).
+    raw_input = sys.stdin.read()
 
-    state = read_state()
+    # Parse hook input for context logging.
+    tool_name = "?"
+    try:
+        hook_input = json.loads(raw_input)
+        tool_name = hook_input.get("tool_name", "?")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Read and evaluate rate limit state.
+    state, state_status = read_state_raw()
 
     if state is None:
-        # No state file or stale data — allow the tool call.
+        # No usable state — log why and allow the tool call.
+        log(
+            f"PASS (no state) tool={tool_name}\n"
+            f"  reason: {state_status}\n"
+            f"  config: threshold={THRESHOLD_PERCENT}%, "
+            f"max_state_age={format_duration(MAX_STATE_AGE)}"
+        )
         sys.exit(0)
 
     exceeded, sleep_seconds, window_name = check_limits(state)
 
     if not exceeded:
+        log(
+            f"PASS (under threshold) tool={tool_name}\n"
+            f"  {state_status}\n"
+            f"  threshold: {THRESHOLD_PERCENT}%\n"
+            f"{dump_state(state)}"
+        )
         sys.exit(0)
 
     # --- Rate limit threshold exceeded — sleep until resets_at ---
@@ -144,42 +246,63 @@ def main() -> None:
     # converts to epoch seconds → status line JSON → our state file.
     # No timezone conversion needed; epoch is timezone-agnostic.
 
-    resets_at = state[window_name]["resets_at"]
-    if resets_at > 1e12:
-        resets_at = resets_at / 1000
+    resets_at = normalize_epoch(state[window_name]["resets_at"])
     used_pct = state[window_name]["used_percentage"]
+
     log(
-        f"Rate limit {format_window(window_name)} at {used_pct:.1f}% "
-        f"(threshold: {THRESHOLD_PERCENT:.0f}%). "
-        f"Sleeping until reset in {format_duration(sleep_seconds)}."
+        f"SLEEPING tool={tool_name}\n"
+        f"  {state_status}\n"
+        f"  threshold: {THRESHOLD_PERCENT}%\n"
+        f"  triggered by: {format_window(window_name)} at {used_pct:.1f}%\n"
+        f"  resets at: {epoch_to_local(resets_at)}\n"
+        f"  sleep duration: {format_duration(sleep_seconds)} (max {format_duration(MAX_SLEEP)})\n"
+        f"  re-check interval: {format_duration(RECHECK_INTERVAL)}\n"
+        f"  full state:\n"
+        f"{dump_state(state)}"
     )
 
     # Sleep in chunks. The primary wake condition is the clock reaching
     # resets_at. The state file re-check is only an early-exit optimization
     # (the file won't normally update while we're blocking the tool loop).
+    cycle = 0
     while True:
         now = time.time()
         remaining = min(resets_at - now, MAX_SLEEP)
 
         if remaining <= 0:
-            log("Reset time reached. Resuming.")
+            log(
+                f"RESUMING (reset time reached)\n"
+                f"  slept for {cycle} cycles ({cycle * RECHECK_INTERVAL}s)\n"
+                f"  proceeding with tool={tool_name}"
+            )
             break
 
         chunk = min(RECHECK_INTERVAL, remaining)
         time.sleep(chunk)
+        cycle += 1
 
         # Early exit: if the state file happens to have been updated
         # (e.g. user interacted manually), check if limits dropped.
-        fresh_state = read_state()
+        fresh_state, fresh_status = read_state_raw()
         if fresh_state is not None:
             fresh_exceeded, _, _ = check_limits(fresh_state)
             if not fresh_exceeded:
-                log("Rate limits dropped below threshold. Resuming early.")
+                log(
+                    f"RESUMING EARLY (limits dropped below threshold)\n"
+                    f"  slept for {cycle} cycles ({cycle * RECHECK_INTERVAL}s)\n"
+                    f"  {fresh_status}\n"
+                    f"  fresh state:\n"
+                    f"{dump_state(fresh_state)}\n"
+                    f"  proceeding with tool={tool_name}"
+                )
                 break
 
         time_left = resets_at - time.time()
         if time_left > 0:
-            log(f"Still paused. ~{format_duration(time_left)} until reset.")
+            log(
+                f"  cycle {cycle}: ~{format_duration(time_left)} until reset "
+                f"({epoch_to_local(resets_at)})"
+            )
 
     # Exit 0 — allow the tool call to proceed.
     sys.exit(0)
