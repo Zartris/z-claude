@@ -20,6 +20,19 @@
       "category": "workflow",
       "tags": ["rate-limit", "overnight", "automation", "hooks", "429"],
       "keywords": ["rate-limit", "overnight", "automation", "hooks", "429", "pause", "sleep"]
+    },
+    {
+      "name": "claude-canvas",
+      "description": "A shared visual canvas for Claude Code -- draw diagrams, wireframes, and mockups in the browser and collect visual feedback",
+      "version": "1.0.15",
+      "author": { "name": "Udi Talias" },
+      "source": { "source": "github", "repo": "uditalias/claude-canvas" },
+      "homepage": "https://github.com/uditalias/claude-canvas",
+      "repository": "https://github.com/uditalias/claude-canvas",
+      "license": "MIT",
+      "category": "developer-tools",
+      "tags": ["canvas", "visual", "drawing", "wireframe", "diagram", "ui"],
+      "keywords": ["canvas", "visual", "drawing", "whiteboard", "wireframe", "diagram", "mockup", "feedback"]
     }
   ]
 }
